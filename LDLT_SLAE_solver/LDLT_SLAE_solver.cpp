@@ -1,11 +1,24 @@
 ﻿// LDLT_SLAE_solver.cpp : Этот файл содержит функцию "main". Здесь начинается и заканчивается выполнение программы.
 //
-
+#include "functions.h"
 #include <iostream>
+#include "mpi.h"
+#include <omp.h>
 
 int main()
 {
-    std::cout << "Hello World!\n";
+    matrix* m = read_matrix("C:/Users/itupi/OneDrive/Документы/OS/igortupichinskii-project/LDLT/494_bus.mtx");
+    //for (int i = 0; i < m->size * m->size; ++i) {
+    //    if (m->blocks[i]) {
+    //        std::cout << "block (" << i / m->size << ", " << i % m->size << ")" << std::endl;
+    //        for (int k = 0; k < block_size; ++k) {
+    //            for (int n = 0; n < block_size; ++n) {
+    //                std::cout << (m->blocks[i])->values[k * block_size + n] << "\t";
+    //            }
+    //            std::cout << std::endl;
+    //        }
+    //    }
+    //}
 }
 
 // Запуск программы: CTRL+F5 или меню "Отладка" > "Запуск без отладки"
