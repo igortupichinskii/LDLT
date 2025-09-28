@@ -30,7 +30,7 @@ matrix* read_matrix(std::string);
 
 void calc_block(block*, block*, block*, diagonal*);
 
-void calc_block_final(block*, block*, diagonal*);
+int calc_block_final(block*, block*, diagonal*);
 
 void calc_diag_block(block*, block*, diagonal*);
 
@@ -45,6 +45,8 @@ void sub_block_mul_sol(block*, vect*, vect*);
 void solve_LT_SLAE(block*, vect*);
 
 void sub_block_T_mul_sol(block*, vect*, vect*);
+
+double check_solution(std::string, std::string, std::string);
 
 static inline double hsum256_pd_fast(__m256d v) {
 	__m256d t1 = _mm256_permute2f128_pd(v, v, 0x1); // [x2,x3,x0,x1]

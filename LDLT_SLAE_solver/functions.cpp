@@ -56,10 +56,7 @@ matrix* read_matrix(std::string filename) {
 	}
 }
 
-// Обработку возникающих нулевых блоков перенести в другое место - она должна произвестись ОДИН раз!!!
 void calc_block(block* res, block* upper, block* lower, diagonal* diag) {
-	if (upper == nullptr or lower == nullptr) return;
-	if (res == nullptr) res = new block; 
 	#pragma omp parallel
 	{
 		int num_threads = omp_get_num_threads();
@@ -75,23 +72,11 @@ void calc_block(block* res, block* upper, block* lower, diagonal* diag) {
 			}
 		}
 	}
-	// Проверка на нулевой блок (если нулевой, то очищаем память) - важно, что память для блока выделялась именно в памяти экземпляра программы
-	__m256d zero = _mm256_setzero_pd();
-	for (int i = 0; i < block_size * block_size; i += 4) {
-		__m256d vec = _mm256_load_pd(res->values + i);
-		__m256d cmp = _mm256_cmp_pd(vec, zero, _CMP_NEQ_OQ);
-		int mask = _mm256_movemask_pd(cmp);
-		if (mask != 0) {
-			return;
-		}
-	}
-	delete res;
-	res = nullptr;
 }
 
 //Есть ошибка при подсчете - не делили на диагональный прежде чем высчитывать следующие столбцы (или нет?) - Возможное решение - убрать домножение на диагональный в цикле по m
-void calc_block_final(block* res, block* upper, diagonal* diag) {
-	if (res == nullptr) return;
+int calc_block_final(block* res, block* upper, diagonal* diag) {
+	if (res == nullptr) return 0;
 	#pragma omp parallel
 	{
 		int num_threads = omp_get_num_threads();
@@ -121,11 +106,10 @@ void calc_block_final(block* res, block* upper, diagonal* diag) {
 		__m256d cmp = _mm256_cmp_pd(vec, zero, _CMP_NEQ_OQ);
 		int mask = _mm256_movemask_pd(cmp);
 		if (mask != 0) {
-			return;
+			return 0;
 		}
 	}
-	delete res;
-	res = nullptr;
+	return 1;
 }
 
 
@@ -230,5 +214,60 @@ void sub_block_T_mul_sol(block* A, vect* x, vect* b) {
 		for (int i = 0; i < block_size; ++i) {
 			b->values[i] -= A->values[i * block_size + n] * x->values[i];
 		}
+	}
+}
+
+double check_solution(std::string matrix_fn, std::string solution_fn, std::string result_fn) {
+	std::ifstream m_input(matrix_fn);
+	double* sol;
+	double* res;
+	double* mult;
+	if (!m_input.is_open()) {
+		return -1;
+	}
+	else {
+		std::string buf;
+		int SIZE, NONZEROS, size_block_matrix;
+		while (!m_input.eof()) {
+			if (!std::getline(m_input, buf)) return -1;
+			if (buf[0] != '%') {
+				std::istringstream iss(buf);
+				iss >> SIZE >> NONZEROS;
+				sol = new double [SIZE];
+				res = new double [SIZE];
+				mult = new double[SIZE];
+				std::ifstream sol_input(solution_fn);
+				for (int i = 0; i < SIZE; ++i) sol_input >> sol[i];
+				sol_input.close();
+				std::ifstream res_input(result_fn);
+				for (int i = 0; i < SIZE; ++i) res_input >> res[i];
+				res_input.close();
+				for (int i = 0; i < SIZE; ++i) mult[i] = 0;
+				break;
+			}
+		}
+		int col, row;
+		double val;
+		while (!m_input.eof()) {
+			m_input >> row >> col >> val;
+			--row;
+			--col;
+			if (row == col) {
+				mult[row] += val * sol[row];
+			}
+			else {
+				mult[row] += val * sol[col];
+				mult[col] += val * sol[row];
+			}
+		}
+		for (int i = 0; i < SIZE; ++i) {
+			mult[i] -= res[i];
+		}
+		double n_1=std::abs(mult[0]), n_2 = std::abs(res[0]);
+		for (int i = 1; i < SIZE; ++i) {
+			if (std::abs(mult[i]) > n_1) n_1 = std::abs(mult[i]);
+			if (std::abs(res[i]) > n_2) n_2 = std::abs(res[i]);
+		}
+		return n_1 / n_2;
 	}
 }
