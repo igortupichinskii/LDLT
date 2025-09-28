@@ -9,50 +9,53 @@ matrix* read_matrix(std::string filename) {
 	else {
 		matrix* m = new matrix;
 		std::string buf;
-		int SIZE, NONZEROS, size_block_matrix;
+		int SIZE=-1, NONZEROS, size_block_matrix;
 		while (!file.eof()) {
 			if (!std::getline(file, buf)) return nullptr;
 			if (buf[0] != '%') {
 				std::istringstream iss(buf);
 				iss >> SIZE >> NONZEROS;
-				size_block_matrix = SIZE / block_size + (int)(!!(SIZE / block_size));
-				(*m).blocks = new block* [size_block_matrix * size_block_matrix];
-				(*m).diagonals = new diagonal * [size_block_matrix];
-				for (int i = 0; i < size_block_matrix * size_block_matrix; i++) {
-					m->blocks[i] = nullptr;
-				}
-				for (int i = 0; i < size_block_matrix; ++i) {
-					m->diagonals[i] = new diagonal;
-				}
-				(*m).size = size_block_matrix;
-				std::cout << "Matrix memory initialized" << std::endl;
 				break;
 			}
 		}
-		int col, row, b_col, b_row, row_in_block, col_in_block, block_array_ind, index_in_block;
-		double val;
-		while (!file.eof()) {
-			file >> row >> col >> val;
-			--row;
-			--col;
-			b_row = row / block_size;
-			b_col = col / block_size;
-			row_in_block = row % block_size;
-			col_in_block = col % block_size;
-			block_array_ind = b_col * size_block_matrix + b_row;
-			index_in_block = row_in_block * block_size + col_in_block;
-			if (m->blocks[block_array_ind]) {
-				m->blocks[block_array_ind]->values[index_in_block] = val;
+		if (SIZE > 0) {
+			size_block_matrix = SIZE / block_size + (int)(!!(SIZE / block_size));
+			(*m).blocks = new block * [size_block_matrix * size_block_matrix];
+			(*m).diagonals = new diagonal * [size_block_matrix];
+			for (int i = 0; i < size_block_matrix * size_block_matrix; i++) {
+				m->blocks[i] = nullptr;
 			}
-			else {
-				m->blocks[block_array_ind] = new block;
-				m->blocks[block_array_ind]->values[index_in_block] = val;
+			for (int i = 0; i < size_block_matrix; ++i) {
+				m->diagonals[i] = new diagonal;
 			}
-			if (row == col) {
-				m->diagonals[b_row]->values[row_in_block] = val;
+			(*m).size = size_block_matrix;
+			int col, row, b_col, b_row, row_in_block, col_in_block, block_array_ind, index_in_block;
+			double val;
+			while (!file.eof()) {
+				file >> row >> col >> val;
+				--row;
+				--col;
+				b_row = row / block_size;
+				b_col = col / block_size;
+				row_in_block = row % block_size;
+				col_in_block = col % block_size;
+				block_array_ind = b_col * size_block_matrix + b_row;
+				index_in_block = row_in_block * block_size + col_in_block;
+				if (m->blocks[block_array_ind]) {
+					m->blocks[block_array_ind]->values[index_in_block] = val;
+				}
+				else {
+					m->blocks[block_array_ind] = new block;
+					m->blocks[block_array_ind]->values[index_in_block] = val;
+				}
+				if (row == col) {
+					m->diagonals[b_row]->values[row_in_block] = val;
+				}
 			}
+			std::cout << "Matrix read without problems\n";
+			return m;
 		}
-		return m;
+		return nullptr;
 	}
 }
 
@@ -227,29 +230,31 @@ double check_solution(std::string matrix_fn, std::string solution_fn, std::strin
 	}
 	else {
 		std::string buf;
-		int SIZE, NONZEROS, size_block_matrix;
+		int SIZE=-1, NONZEROS, size_block_matrix;
 		while (!m_input.eof()) {
 			if (!std::getline(m_input, buf)) return -1;
 			if (buf[0] != '%') {
 				std::istringstream iss(buf);
 				iss >> SIZE >> NONZEROS;
-				sol = new double [SIZE];
-				res = new double [SIZE];
-				mult = new double[SIZE];
-				std::ifstream sol_input(solution_fn);
-				for (int i = 0; i < SIZE; ++i) sol_input >> sol[i];
-				sol_input.close();
-				std::ifstream res_input(result_fn);
-				for (int i = 0; i < SIZE; ++i) res_input >> res[i];
-				res_input.close();
-				for (int i = 0; i < SIZE; ++i) mult[i] = 0;
 				break;
 			}
 		}
+		if (SIZE == -1) {
+			return -1;
+		}
+		sol = new double[SIZE];
+		res = new double[SIZE];
+		mult = new double[SIZE];
+		std::ifstream sol_input(solution_fn);
+		for (int i = 0; i < SIZE; ++i) sol_input >> sol[i];
+		sol_input.close();
+		std::ifstream res_input(result_fn);
+		for (int i = 0; i < SIZE; ++i) res_input >> res[i];
+		res_input.close();
+		for (int i = 0; i < SIZE; ++i) mult[i] = 0;
 		int col, row;
 		double val;
-		while (!m_input.eof()) {
-			m_input >> row >> col >> val;
+		while (m_input >> row >> col >> val) {
 			--row;
 			--col;
 			if (row == col) {

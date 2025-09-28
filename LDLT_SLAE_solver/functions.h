@@ -5,6 +5,7 @@
 #include <iostream>
 #include <immintrin.h>
 #include <omp.h>
+#include <vector>
 
 #define block_size 32
 

@@ -15,6 +15,8 @@
 #define TAG_GET_DIAG 107
 #define TAG_DIAG 108
 #define TAG_NEW_COLUMN 109
+#define TAG_STOP 200
+#define TAG_START 500
 
 struct TaskHdr {
     int col_j;
@@ -52,9 +54,13 @@ int main(int argc, char *argv[])
     matrix* m = nullptr;
     int nb = 0;
     if (rank == 0) { // Главный процесс - должен раздавать задачи другим процессам, также занимается вычислением диагональных блоков матрицы
-        m = read_matrix("C:/Users/itupi/OneDrive/Документы/OS/igortupichinskii-project/LDLT/494_bus.mtx");
+        m = read_matrix("C:/Users/itupi/OneDrive/Документы/OS/igortupichinskii-project/LDLT/50k.mtx");
+        if (m == nullptr) {
+            std::cerr << "Failed to read matrix" << std::endl;
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
         nb = m->size;
-        MPI_Barrier(MPI_COMM_WORLD);
+        std::cout << "Matrix read\n";
     }
     MPI_Bcast(&nb, 1, MPI_INT, 0, MPI_COMM_WORLD);
     if (rank == 0) {
@@ -67,6 +73,7 @@ int main(int argc, char *argv[])
             //После этого диагональный элемент столбца готов - можно раздавать блоки
             int last_index = column_n;
             int tasks_in_proceed=0;
+            std::vector<int> waiting_workers;
             while (last_index < nb || tasks_in_proceed) {
                 MPI_Status st;
                 MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &st);
@@ -77,7 +84,7 @@ int main(int argc, char *argv[])
                         int hdr[3];
                         hdr[1] = column_n;
                         hdr[0] = ++last_index;
-                        int block_index = hdr[0] * nb + hdr[1];
+                        int block_index = hdr[0] + hdr[1] * nb;
                         hdr[2] = (m->blocks[block_index] == nullptr) ? 0 : 1;
                         MPI_Send(hdr, 3, MPI_INT, st.MPI_SOURCE, TAG_TASK, MPI_COMM_WORLD); //Отправка индексов и пустоты блока
                         if (hdr[2]) {
@@ -86,17 +93,20 @@ int main(int argc, char *argv[])
                         tasks_in_proceed++;
                     }
                     else { //Пока воркер должен стоять в простое (вызвать барьер) - это должны получить все воркеры
-                        MPI_Send(NULL, 1, MPI_BYTE, st.MPI_SOURCE, TAG_WAIT, MPI_COMM_WORLD);
+                        int dummy = 1;
+                        MPI_Send(&dummy, 1, MPI_INT, st.MPI_SOURCE, TAG_WAIT, MPI_COMM_WORLD);
+
+                        waiting_workers.push_back(st.MPI_SOURCE);
                     }
                 }
                 else {
                     if (st.MPI_TAG == TAG_GET_DATA) { // Это значит, что он хочет получить новые блоки
                         int hdr[3]; // Столбец, две строки в порядке возрастания
                         MPI_Recv(hdr, 3, MPI_INT, st.MPI_SOURCE, TAG_GET_DATA, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                        if (m->blocks[hdr[1] * nb + hdr[0]] == nullptr || m->blocks[hdr[2] * nb + hdr[0]] == nullptr) { //Какой-то из блоков пустой - значит, надо пройти дальше
+                        if (m->blocks[hdr[1] + hdr[0] * nb] == nullptr || m->blocks[hdr[2] + hdr[0] * nb] == nullptr) { //Какой-то из блоков пустой - значит, надо пройти дальше
                             int new_col = hdr[0];
                             while (new_col < hdr[1]) {
-                                if (m->blocks[hdr[1] * nb + new_col] && m->blocks[hdr[2] * nb + new_col]) {
+                                if (m->blocks[hdr[1] + new_col * nb] && m->blocks[hdr[2] + new_col * nb]) {
                                     break;
                                 }
                                 ++new_col;
@@ -107,14 +117,14 @@ int main(int argc, char *argv[])
                             }
                             else {
                                 MPI_Send(&new_col, 1, MPI_INT, st.MPI_SOURCE, TAG_NEW_COLUMN, MPI_COMM_WORLD);
-                                send_block(m->blocks[hdr[1] * nb + new_col], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
-                                send_block(m->blocks[hdr[2] * nb + new_col], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                                send_block(m->blocks[hdr[1] + new_col * nb], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                                send_block(m->blocks[hdr[2] + new_col * nb], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
                                 send_diag(m->diagonals[new_col], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
                             }
                         }
                         else {
-                            send_block(m->blocks[hdr[1] * nb + hdr[0]], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
-                            send_block(m->blocks[hdr[2] * nb + hdr[0]], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                            send_block(m->blocks[hdr[1] + hdr[0] * nb], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                            send_block(m->blocks[hdr[2] + hdr[0] * nb], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
                             send_diag(m->diagonals[hdr[0]], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
                         }
                     }
@@ -123,8 +133,14 @@ int main(int argc, char *argv[])
                             int hdr[3]; //индексы блока и заполненность
                             MPI_Recv(hdr, 3, MPI_INT, st.MPI_SOURCE, TAG_RESULT, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
                             if (hdr[2]) {
-                                if (!(m->blocks[hdr[0] * nb + hdr[1]])) m->blocks[hdr[0] * nb + hdr[1]] = new block;
-                                recv_block(m->blocks[hdr[0] * nb + hdr[1]], st.MPI_SOURCE, TAG_RESULT, MPI_COMM_WORLD);
+                                if (!(m->blocks[hdr[0] + hdr[1] * nb])) m->blocks[hdr[0] + hdr[1] * nb] = new block;
+                                recv_block(m->blocks[hdr[0] + hdr[1] * nb], st.MPI_SOURCE, TAG_RESULT, MPI_COMM_WORLD);
+                            }
+                            else {
+                                if ((m->blocks[hdr[0] + hdr[1] * nb])) {
+                                    delete m->blocks[hdr[0] + hdr[1] * nb];
+                                    m->blocks[hdr[0] + hdr[1] * nb] = nullptr;
+                                }
                             }
                             tasks_in_proceed--;
                         }
@@ -139,25 +155,59 @@ int main(int argc, char *argv[])
                     }
                 }
             }
-            MPI_Barrier(MPI_COMM_WORLD);
+            for (auto i : waiting_workers) {
+                int dummy = 1;
+                MPI_Send(&dummy, 1, MPI_INT, i, TAG_START, MPI_COMM_WORLD);
+            }
+            waiting_workers.clear();
         }
+        int dummy = 1;
+        for (int i = 1; i < size; ++i) {
+            MPI_Recv(&dummy, 1, MPI_INT, i, TAG_READY, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Send(&dummy, 1, MPI_INT, i, TAG_STOP, MPI_COMM_WORLD);
+        }
+        if (m != nullptr) {
+            // Очистка блоков
+            for (int i = 0; i < nb * nb; ++i) {
+                if (m->blocks[i] != nullptr) {
+                    delete m->blocks[i];
+                }
+            }
+            delete[] m->blocks;
 
+            // Очистка диагоналей
+            for (int i = 0; i < nb; ++i) {
+                if (m->diagonals[i] != nullptr) {
+                    delete m->diagonals[i];
+                }
+            }
+            delete[] m->diagonals;
+
+            // Очистка самой структуры matrix
+            delete m;
+            m = nullptr;
+
+            std::cout << "Matrix memory cleaned up" << std::endl;
+        }
     }
     else { //Workers
-        MPI_Barrier(MPI_COMM_WORLD);
+#ifdef _DEBUG
+        std::cout << "Worker - " << rank <<"\n";
+#endif
         int dummy = 1;
         block* upper= new block;
         block* diag_b = new block;
         block* lower = new block;
         block* work = new block;
         diagonal* diag = new diagonal;
-        while (true) {
+        bool keep_going = true;
+        while (keep_going) {
             MPI_Send(&dummy, 1, MPI_INT, 0, TAG_READY, MPI_COMM_WORLD);
             MPI_Status st;
             MPI_Probe(0, MPI_ANY_TAG, MPI_COMM_WORLD, &st);
             if (st.MPI_TAG == TAG_WAIT) {
-                MPI_Recv(NULL, 0, MPI_BYTE, 0, TAG_WAIT, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                MPI_Barrier(MPI_COMM_WORLD);
+                MPI_Recv(&dummy, 1, MPI_INT, 0, TAG_WAIT, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Recv(&dummy, 1, MPI_INT, 0, TAG_START, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             }
             else {
                 if (st.MPI_TAG == TAG_TASK) {
@@ -215,19 +265,22 @@ int main(int argc, char *argv[])
                         send_block(work, 0, TAG_RESULT, MPI_COMM_WORLD);
                     }
                 }
+                else {
+                    if (st.MPI_TAG == TAG_STOP) {
+                        MPI_Recv(&dummy, 1, MPI_INT, 0, TAG_STOP, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                        keep_going = false;
+                    }
+                }
             }
         }
+        delete upper;
+        delete lower;
+        delete work;
+        delete diag_b;
+        delete diag;
     }
+    MPI_Type_free(&MPI_BLOCK);
+    MPI_Type_free(&MPI_DIAG);
+    std::cout << rank << std::endl;
     MPI_Finalize();
 }
-
-// Запуск программы: CTRL+F5 или меню "Отладка" > "Запуск без отладки"
-// Отладка программы: F5 или меню "Отладка" > "Запустить отладку"
-
-// Советы по началу работы 
-//   1. В окне обозревателя решений можно добавлять файлы и управлять ими.
-//   2. В окне Team Explorer можно подключиться к системе управления версиями.
-//   3. В окне "Выходные данные" можно просматривать выходные данные сборки и другие сообщения.
-//   4. В окне "Список ошибок" можно просматривать ошибки.
-//   5. Последовательно выберите пункты меню "Проект" > "Добавить новый элемент", чтобы создать файлы кода, или "Проект" > "Добавить существующий элемент", чтобы добавить в проект существующие файлы кода.
-//   6. Чтобы снова открыть этот проект позже, выберите пункты меню "Файл" > "Открыть" > "Проект" и выберите SLN-файл.
