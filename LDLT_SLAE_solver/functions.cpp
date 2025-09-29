@@ -31,8 +31,7 @@ matrix* read_matrix(std::string filename) {
 			(*m).size = size_block_matrix;
 			int col, row, b_col, b_row, row_in_block, col_in_block, block_array_ind, index_in_block;
 			double val;
-			while (!file.eof()) {
-				file >> row >> col >> val;
+			while (file >> row >> col >> val) {
 				--row;
 				--col;
 				b_row = row / block_size;
@@ -51,6 +50,11 @@ matrix* read_matrix(std::string filename) {
 				if (row == col) {
 					m->diagonals[b_row]->values[row_in_block] = val;
 				}
+			}
+			//Дозаполняем единицами диагональ правого нижнего блока
+			for (int i = SIZE % block_size; i < block_size; ++i) {
+				m->diagonals[size_block_matrix - 1]->values[i] = 1;
+				m->blocks[size_block_matrix * size_block_matrix - 1]->values[i * block_size + i] = 1;
 			}
 			std::cout << "Matrix read without problems\n";
 			return m;
@@ -268,11 +272,34 @@ double check_solution(std::string matrix_fn, std::string solution_fn, std::strin
 		for (int i = 0; i < SIZE; ++i) {
 			mult[i] -= res[i];
 		}
-		double n_1=std::abs(mult[0]), n_2 = std::abs(res[0]);
-		for (int i = 1; i < SIZE; ++i) {
-			if (std::abs(mult[i]) > n_1) n_1 = std::abs(mult[i]);
-			if (std::abs(res[i]) > n_2) n_2 = std::abs(res[i]);
+		double n_1=0, n_2 = 0;
+
+		for (int i = 0; i < SIZE; ++i) {
+			n_1 += mult[i] * mult[i];
+			n_2 += res[i] * res[i];
 		}
-		return n_1 / n_2;
+		delete[] sol;
+		delete[] res;
+		delete[] mult;
+		return std::sqrt(n_1) / std::sqrt(n_2);
 	}
+}
+
+double random_double(double min, double max) {
+	static std::random_device rd;
+	static std::mt19937 gen(rd());
+	std::uniform_real_distribution<double> dis(min, max);
+	return dis(gen);
+}
+
+vect** random_vector_generation(int dim) {
+	vect** res;
+	res = new vect*[dim];
+	for (int i = 0; i < dim; ++i) {
+		res[i] = new vect;
+		for (int j = 0; j < block_size; ++j) {
+			res[i]->values[j] = random_double(-10000.0, 10000.0);
+		}
+	}
+	return res;
 }

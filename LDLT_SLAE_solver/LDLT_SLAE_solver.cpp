@@ -1,5 +1,7 @@
 ﻿// LDLT_SLAE_solver.cpp : Этот файл содержит функцию "main". Здесь начинается и заканчивается выполнение программы.
 //
+#include <chrono>
+#include <windows.h>
 #include "functions.h"
 #include <iostream>
 #include "mpi.h"
@@ -36,13 +38,44 @@ static inline void send_diag(const diagonal* d, int dst, int tag, MPI_Comm comm)
 static inline void recv_diag(diagonal* d, int src, int tag, MPI_Comm comm) {
     MPI_Recv(d->values, block_size, MPI_DOUBLE, src, tag, comm, MPI_STATUS_IGNORE);
 }
+static inline void send_vect(const vect* d, int dst, int tag, MPI_Comm comm) {
+    MPI_Send(const_cast<double*>(d->values), block_size, MPI_DOUBLE, dst, tag, comm);
+}
+static inline void recv_vect(vect* d, int src, int tag, MPI_Comm comm) {
+    MPI_Recv(d->values, block_size, MPI_DOUBLE, src, tag, comm, MPI_STATUS_IGNORE);
+}
 
-int main(int argc, char *argv[])
+void set_processor_affinity(int rank) {
+    DWORD_PTR processAffinityMask = 0;
+    DWORD_PTR systemAffinityMask = 0;
+
+    HANDLE hProcess = GetCurrentProcess();
+    GetProcessAffinityMask(hProcess, &processAffinityMask, &systemAffinityMask);
+
+    // Распределяем ядра по процессам: 0,2,4,6,8,10
+    int core = rank * 2;
+    DWORD_PTR newMask = 1ULL << core;
+
+    SetProcessAffinityMask(hProcess, newMask);
+    std::cout << "Process " << rank << " bound to core " << core << std::endl;
+}
+
+std::string convert_to_forward_slashes(const std::string& path) {
+    std::string result = path;
+    for (auto& c : result) {
+        if (c == '\\') c = '/';
+    }
+    return result;
+}
+
+int main(int argc, char *argv[]) //Только путь до файла матрицы
 {
     int size, rank;
     MPI_Init(&argc, &argv);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    set_processor_affinity(rank);
 
     MPI_Datatype MPI_BLOCK, MPI_DIAG;
     MPI_Type_contiguous(block_size * block_size, MPI_DOUBLE, &MPI_BLOCK);
@@ -53,13 +86,17 @@ int main(int argc, char *argv[])
 
     matrix* m = nullptr;
     int nb = 0;
+
+    std::chrono::high_resolution_clock::time_point start_time, end_time;
+
     if (rank == 0) { // Главный процесс - должен раздавать задачи другим процессам, также занимается вычислением диагональных блоков матрицы
-        m = read_matrix("C:/Users/itupi/OneDrive/Документы/OS/igortupichinskii-project/LDLT/50k.mtx");
+        m = read_matrix(convert_to_forward_slashes(argv[1]));
         if (m == nullptr) {
             std::cerr << "Failed to read matrix" << std::endl;
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
         nb = m->size;
+        start_time = std::chrono::high_resolution_clock::now();
         std::cout << "Matrix read\n";
     }
     MPI_Bcast(&nb, 1, MPI_INT, 0, MPI_COMM_WORLD);
@@ -166,6 +203,197 @@ int main(int argc, char *argv[])
             MPI_Recv(&dummy, 1, MPI_INT, i, TAG_READY, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             MPI_Send(&dummy, 1, MPI_INT, i, TAG_STOP, MPI_COMM_WORLD);
         }
+        end_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+        std::cout << "Computation LDLT time: " << duration.count() << " milliseconds" << std::endl;
+        std::cout << "Computation LDLT time: " << duration.count() / 1000.0 << " seconds" << std::endl;
+
+        vect** B = random_vector_generation(m->size);
+        std::ofstream out("b.txt");
+        for (int i = 0; i < m->size; ++i) {
+            for (int j = 0; j < block_size; ++j) {
+                out << B[i]->values[j] << std::endl;
+            }
+        }
+        out.close();
+        std::cout << "Starting solving SLAE" << std::endl;
+        start_time = std::chrono::high_resolution_clock::now();
+        //Решение нижнетреугольной СЛАУ
+        std::cout << "Solving lower_triag SLAE" << std::endl;
+        for (int column_n = 0; column_n < nb; ++column_n) {
+            solve_L_SLAE(m->blocks[column_n * nb + column_n], B[column_n]);
+            int last_index = column_n;
+            int tasks_in_proceed = 0;
+            int dummy;
+            std::vector<int> waiting_workers;
+            while (last_index < nb || tasks_in_proceed) {
+                MPI_Status st;
+                MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &st);
+                
+                switch (st.MPI_TAG) {
+                case TAG_READY: {
+                    MPI_Recv(&dummy, 1, MPI_INT, st.MPI_SOURCE, TAG_READY, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                    int col = last_index + 1;
+                    while (col < nb) {
+                        if (m->blocks[col + column_n * nb]) {
+                            break;
+                        }
+                        col++;
+                    }
+                    last_index = col;
+                    if (last_index >= nb) {
+                        MPI_Send(&dummy, 1, MPI_INT, st.MPI_SOURCE, TAG_WAIT, MPI_COMM_WORLD);
+                        waiting_workers.push_back(st.MPI_SOURCE);
+                    }
+                    else {
+                        MPI_Send(&last_index, 1, MPI_INT, st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                        send_block(m->blocks[last_index + column_n * nb], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                        send_vect(B[column_n], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                        send_vect(B[last_index], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                        tasks_in_proceed++;
+                    }
+                    break;
+                }
+                case TAG_RESULT: {
+                    int row;
+                    MPI_Recv(&row, 1, MPI_INT, st.MPI_SOURCE, TAG_RESULT, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                    recv_vect(B[row], st.MPI_SOURCE, TAG_RESULT, MPI_COMM_WORLD);
+                    tasks_in_proceed--;
+                    break;
+                }
+                default:
+                    break;
+                }
+            }
+            for (auto i : waiting_workers) {
+                int dummy = 1;
+                MPI_Send(&dummy, 1, MPI_INT, i, TAG_START, MPI_COMM_WORLD);
+            }
+            waiting_workers.clear();
+        }
+        dummy = 1;
+        for (int i = 1; i < size; ++i) {
+            MPI_Recv(&dummy, 1, MPI_INT, i, TAG_READY, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Send(&dummy, 1, MPI_INT, i, TAG_STOP, MPI_COMM_WORLD);
+        }
+        //Решение диагональной СЛАУ
+        std::cout << "Solving diagonal SLAE" << std::endl;
+        int column_n = 0;
+        int tasks_in_proceed = 0;
+        std::vector<int> waiting_workers;
+        while (column_n < nb || tasks_in_proceed) {
+            MPI_Status st;
+            MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &st);
+            int dummy;
+            switch (st.MPI_TAG) {
+            case TAG_READY:
+                MPI_Recv(&dummy, 1, MPI_INT, st.MPI_SOURCE, TAG_READY, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                if (column_n == nb) {
+                    MPI_Send(&dummy, 1, MPI_INT, st.MPI_SOURCE, TAG_WAIT, MPI_COMM_WORLD);
+                    waiting_workers.push_back(st.MPI_SOURCE);
+                }
+                else {
+                    MPI_Send(&column_n, 1, MPI_INT, st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                    send_diag(m->diagonals[column_n], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                    send_vect(B[column_n], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                    tasks_in_proceed++;
+                    column_n++;
+                }
+                break;
+            case TAG_RESULT: {
+                int row;
+                MPI_Recv(&row, 1, MPI_INT, st.MPI_SOURCE, TAG_RESULT, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                recv_vect(B[row], st.MPI_SOURCE, TAG_RESULT, MPI_COMM_WORLD);
+                tasks_in_proceed--;
+                break;
+            }
+            default:
+                break;
+            }
+        }
+        for (auto i : waiting_workers) {
+            int dummy = 1;
+            MPI_Send(&dummy, 1, MPI_INT, i, TAG_START, MPI_COMM_WORLD);
+        }
+        waiting_workers.clear();
+        dummy = 1;
+        for (int i = 1; i < size; ++i) {
+            MPI_Recv(&dummy, 1, MPI_INT, i, TAG_READY, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Send(&dummy, 1, MPI_INT, i, TAG_STOP, MPI_COMM_WORLD);
+        }
+        //Решение верхнетреугольной СЛАУ
+        std::cout << "Solving upper_triag SLAE" << std::endl;
+        for (int column_n = nb - 1; column_n >= 0; --column_n) {
+            solve_LT_SLAE(m->blocks[column_n * nb + column_n], B[column_n]);
+            int last_index = column_n;
+            int tasks_in_proceed = 0;
+            int dummy;
+            std::vector<int> waiting_workers;
+            while (last_index >= 0 || tasks_in_proceed) {
+                MPI_Status st;
+                MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &st);
+
+                switch (st.MPI_TAG) {
+                case TAG_READY: {
+                    MPI_Recv(&dummy, 1, MPI_INT, st.MPI_SOURCE, TAG_READY, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                    int col = last_index - 1;
+                    while (col >= 0) {
+                        if (m->blocks[col * nb + column_n]) {
+                            break;
+                        }
+                        col--;
+                    }
+                    last_index = col;
+                    if (last_index <= -1) {
+                        MPI_Send(&dummy, 1, MPI_INT, st.MPI_SOURCE, TAG_WAIT, MPI_COMM_WORLD);
+                        waiting_workers.push_back(st.MPI_SOURCE);
+                    }
+                    else {
+                        MPI_Send(&last_index, 1, MPI_INT, st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                        send_block(m->blocks[last_index * nb + column_n], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                        send_vect(B[column_n], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                        send_vect(B[last_index], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                        tasks_in_proceed++;
+                    }
+                    break;
+                }
+                case TAG_RESULT: {
+                    int row;
+                    MPI_Recv(&row, 1, MPI_INT, st.MPI_SOURCE, TAG_RESULT, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                    recv_vect(B[row], st.MPI_SOURCE, TAG_RESULT, MPI_COMM_WORLD);
+                    tasks_in_proceed--;
+                    break;
+                }
+                default:
+                    break;
+                }
+            }
+            for (auto i : waiting_workers) {
+                int dummy = 1;
+                MPI_Send(&dummy, 1, MPI_INT, i, TAG_START, MPI_COMM_WORLD);
+            }
+            waiting_workers.clear();
+        }
+        dummy = 1;
+        for (int i = 1; i < size; ++i) {
+            MPI_Recv(&dummy, 1, MPI_INT, i, TAG_READY, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Send(&dummy, 1, MPI_INT, i, TAG_STOP, MPI_COMM_WORLD);
+        }
+        end_time = std::chrono::high_resolution_clock::now();
+        //Вывод результата
+        std::ofstream out_res("res.txt");
+        for (int i = 0; i < nb; ++i) {
+            for (int j = 0; j < block_size; ++j) {
+                out_res << B[i]->values[j] << std::endl;
+            }
+        }
+        out_res.close();
+        auto duration_2 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+        std::cout << "Computation SLAE time: " << duration_2.count() << " milliseconds" << std::endl;
+        std::cout << "Computation SLAE time: " << duration_2.count() / 1000.0 << " seconds" << std::endl;
+        std::cout << "SLAE is solved, solution is in file res.txt" << std::endl;
+        double solution_acc = check_solution(convert_to_forward_slashes(argv[1]), "res.txt", "b.txt");
+        std::cout << "Accuracy = " << solution_acc << std::endl;
         if (m != nullptr) {
             // Очистка блоков
             for (int i = 0; i < nb * nb; ++i) {
@@ -191,9 +419,6 @@ int main(int argc, char *argv[])
         }
     }
     else { //Workers
-#ifdef _DEBUG
-        std::cout << "Worker - " << rank <<"\n";
-#endif
         int dummy = 1;
         block* upper= new block;
         block* diag_b = new block;
@@ -278,6 +503,107 @@ int main(int argc, char *argv[])
         delete work;
         delete diag_b;
         delete diag;
+        //Решение нижнетреугольной СЛАУ
+        work = new block;
+        vect* x = new vect;
+        vect* b = new vect;
+        keep_going = true;
+        while (keep_going) {
+            MPI_Send(&dummy, 1, MPI_INT, 0, TAG_READY, MPI_COMM_WORLD);
+            MPI_Status st;
+            MPI_Probe(0, MPI_ANY_TAG, MPI_COMM_WORLD, &st);
+            switch (st.MPI_TAG) {
+            case TAG_WAIT:
+                MPI_Recv(&dummy, 1, MPI_INT, 0, TAG_WAIT, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Recv(&dummy, 1, MPI_INT, 0, TAG_START, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                break;
+            case TAG_DATA:
+                MPI_Recv(&dummy, 1, MPI_INT, 0, TAG_DATA, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                recv_block(work, 0, TAG_DATA, MPI_COMM_WORLD);
+                recv_vect(x, 0, TAG_DATA, MPI_COMM_WORLD);
+                recv_vect(b, 0, TAG_DATA, MPI_COMM_WORLD);
+                sub_block_mul_sol(work, x, b);
+                MPI_Send(&dummy, 1, MPI_INT, 0, TAG_RESULT, MPI_COMM_WORLD);
+                send_vect(b, 0, TAG_RESULT, MPI_COMM_WORLD);
+                break;
+            case TAG_STOP:
+                MPI_Recv(&dummy, 1, MPI_INT, 0, TAG_STOP, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                keep_going = false;
+                break;
+            default:
+                break;
+            }
+        }
+        delete work;
+        delete x;
+        delete b;
+
+        //Решение диагональной СЛАУ
+        diagonal* d = new diagonal;
+        b = new vect;
+        keep_going = true;
+        while (keep_going) {
+            MPI_Send(&dummy, 1, MPI_INT, 0, TAG_READY, MPI_COMM_WORLD);
+            MPI_Status st;
+            MPI_Probe(0, MPI_ANY_TAG, MPI_COMM_WORLD, &st);
+            switch (st.MPI_TAG) {
+            case TAG_WAIT:
+                MPI_Recv(&dummy, 1, MPI_INT, 0, TAG_WAIT, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Recv(&dummy, 1, MPI_INT, 0, TAG_START, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                break;
+            case TAG_DATA:
+                MPI_Recv(&dummy, 1, MPI_INT, 0, TAG_DATA, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                recv_diag(d, 0, TAG_DATA, MPI_COMM_WORLD);
+                recv_vect(b, 0, TAG_DATA, MPI_COMM_WORLD);
+                solve_D_SLAE(d, b);
+                MPI_Send(&dummy, 1, MPI_INT, 0, TAG_RESULT, MPI_COMM_WORLD);
+                send_vect(b, 0, TAG_RESULT, MPI_COMM_WORLD);
+                break;
+            case TAG_STOP:
+                MPI_Recv(&dummy, 1, MPI_INT, 0, TAG_STOP, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                keep_going = false;
+                break;
+            default:
+                break;
+            }
+        }
+        delete d;
+        delete b;
+
+        //Решение верхнетреугольной СЛАУ
+        work = new block;
+        x = new vect;
+        b = new vect;
+        keep_going = true;
+        while (keep_going) {
+            MPI_Send(&dummy, 1, MPI_INT, 0, TAG_READY, MPI_COMM_WORLD);
+            MPI_Status st;
+            MPI_Probe(0, MPI_ANY_TAG, MPI_COMM_WORLD, &st);
+            switch (st.MPI_TAG) {
+            case TAG_WAIT:
+                MPI_Recv(&dummy, 1, MPI_INT, 0, TAG_WAIT, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Recv(&dummy, 1, MPI_INT, 0, TAG_START, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                break;
+            case TAG_DATA:
+                MPI_Recv(&dummy, 1, MPI_INT, 0, TAG_DATA, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                recv_block(work, 0, TAG_DATA, MPI_COMM_WORLD);
+                recv_vect(x, 0, TAG_DATA, MPI_COMM_WORLD);
+                recv_vect(b, 0, TAG_DATA, MPI_COMM_WORLD);
+                sub_block_T_mul_sol(work, x, b);
+                MPI_Send(&dummy, 1, MPI_INT, 0, TAG_RESULT, MPI_COMM_WORLD);
+                send_vect(b, 0, TAG_RESULT, MPI_COMM_WORLD);
+                break;
+            case TAG_STOP:
+                MPI_Recv(&dummy, 1, MPI_INT, 0, TAG_STOP, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                keep_going = false;
+                break;
+            default:
+                break;
+            }
+        }
+        delete work;
+        delete x;
+        delete b;
     }
     MPI_Type_free(&MPI_BLOCK);
     MPI_Type_free(&MPI_DIAG);

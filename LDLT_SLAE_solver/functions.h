@@ -6,19 +6,43 @@
 #include <immintrin.h>
 #include <omp.h>
 #include <vector>
+#include <random>
 
 #define block_size 32
 
 struct alignas(32) block {
 	double values[block_size * block_size] = {};
+	void* operator new(size_t size) {
+		return _aligned_malloc(size, 32);
+	}
+
+	void operator delete(void* ptr) {
+		_aligned_free(ptr);
+	}
 };
 
 struct alignas(32) diagonal {
 	double values[block_size] = {};
+
+	void* operator new(size_t size) {
+		return _aligned_malloc(size, 32);
+	}
+
+	void operator delete(void* ptr) {
+		_aligned_free(ptr);
+	}
 };
 
 struct alignas(32) vect {
 	double values[block_size] = {};
+
+	void* operator new(size_t size) {
+		return _aligned_malloc(size, 32);
+	}
+
+	void operator delete(void* ptr) {
+		_aligned_free(ptr);
+	}
 };
 
 struct matrix {
@@ -48,6 +72,10 @@ void solve_LT_SLAE(block*, vect*);
 void sub_block_T_mul_sol(block*, vect*, vect*);
 
 double check_solution(std::string, std::string, std::string);
+
+double random_double(double, double);
+
+vect** random_vector_generation(int);
 
 static inline double hsum256_pd_fast(__m256d v) {
 	__m256d t1 = _mm256_permute2f128_pd(v, v, 0x1); // [x2,x3,x0,x1]
