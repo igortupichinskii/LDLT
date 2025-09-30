@@ -14,7 +14,7 @@ matrix* read_matrix(std::string filename) {
 			if (!std::getline(file, buf)) return nullptr;
 			if (buf[0] != '%') {
 				std::istringstream iss(buf);
-				iss >> SIZE >> NONZEROS;
+				iss >> SIZE >> SIZE >> NONZEROS;
 				break;
 			}
 		}
@@ -32,6 +32,7 @@ matrix* read_matrix(std::string filename) {
 			int col, row, b_col, b_row, row_in_block, col_in_block, block_array_ind, index_in_block;
 			double val;
 			while (file >> row >> col >> val) {
+				if (!val) continue;
 				--row;
 				--col;
 				b_row = row / block_size;
@@ -80,6 +81,15 @@ void calc_block(block* res, block* upper, block* lower, diagonal* diag) {
 		}
 	}
 }
+void calc_block_non_parallel(block* res, block* upper, block* lower, diagonal* diag) {
+	for (int i = 0; i < block_size; ++i) {
+		for (int j = 0; j < block_size; ++j) {
+			for (int k = 0; k < block_size; ++k) {
+				res->values[i * block_size + j] -= lower->values[i * block_size + k] * upper->values[j * block_size + k] * diag->values[k];
+			}
+		}
+	}
+}
 
 //Есть ошибка при подсчете - не делили на диагональный прежде чем высчитывать следующие столбцы (или нет?) - Возможное решение - убрать домножение на диагональный в цикле по m
 int calc_block_final(block* res, block* upper, diagonal* diag) {
@@ -119,6 +129,33 @@ int calc_block_final(block* res, block* upper, diagonal* diag) {
 	return 1;
 }
 
+int calc_block_final_non_parallel(block*res, block* upper, diagonal* diag) {
+	if (res == nullptr) return 0;
+	for (int i = 0; i < block_size; ++i) {
+		for (int j = 0; j < block_size; ++j) { // Обработка элемента (i,j)
+			for (int k = 0; k < j; ++k) {
+				res->values[i * block_size + j] -= res->values[i * block_size + k] * upper->values[j * block_size + k] * diag->values[k];
+			}
+			res->values[i * block_size + j] /= diag->values[j];
+			if (std::isnan(res->values[i * block_size + j])) {
+				return -1;
+			}
+		}
+	}
+
+	// Проверка на нулевой блок (если нулевой, то очищаем память) - важно, что память для блока выделялась именно в памяти экземпляра программы
+	__m256d zero = _mm256_setzero_pd();
+	for (int i = 0; i < block_size * block_size; i += 4) {
+		__m256d vec = _mm256_load_pd(res->values + i);
+		__m256d cmp = _mm256_cmp_pd(vec, zero, _CMP_NEQ_OQ);
+		int mask = _mm256_movemask_pd(cmp);
+		if (mask != 0) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
 
 void calc_diag_block(block* res, block* other, diagonal* diag) {
 	if (other == nullptr) return;
@@ -129,11 +166,22 @@ void calc_diag_block(block* res, block* other, diagonal* diag) {
 		for (int i = id; i < block_size; i += num_threads) {
 			for (int j = 0; j < block_size; j += 4) {
 				__m256d d = _mm256_load_pd(diag->values + j);
-				__m256d low = _mm256_load_pd(res->values + i * block_size + j);
+				__m256d low = _mm256_load_pd(other->values + i * block_size + j);
 				__m256d tmp = _mm256_mul_pd(low, d);
 				for (int k = 0; k <= i; ++k) {
-					res->values[i * block_size + k] -= hsum256_pd_fast(_mm256_mul_pd(tmp, _mm256_load_pd(res->values + k * block_size + j)));
+					res->values[i * block_size + k] -= hsum256_pd_fast(_mm256_mul_pd(tmp, _mm256_load_pd(other->values + k * block_size + j)));
 				}
+			}
+		}
+	}
+}
+
+void calc_diag_block_non_parallel(block* res, block* other, diagonal* diag) {
+	if (other == nullptr) return;
+	for (int i = 0; i < block_size; ++i) {
+		for (int j = 0; j <= i; ++j) {
+			for (int k = 0; k < block_size; ++k) {
+				res->values[i * block_size + j] -= other->values[i * block_size + k] * other->values[j * block_size + k] * diag->values[k];
 			}
 		}
 	}
@@ -182,6 +230,28 @@ void calc_diag_block_final(block* res, diagonal* diag) {
 			}
 		}
 	}
+}
+
+
+int calc_diag_block_final_non_parallel(block* res, diagonal* diag) {
+	for (int i = 0; i < block_size; ++i) {
+		for (int j = 0; j <= i; ++j) {
+			for (int k = 0; k < j; ++k) {
+				res->values[i * block_size + j] -= res->values[i * block_size + k] * res->values[j * block_size + k] * diag->values[k];
+			}
+			if (i != j) {
+				res->values[i * block_size + j] /= res->values[j * block_size + j];
+			}
+			else {
+				diag->values[i] = res->values[i * block_size + j];
+			}
+			if (std::isnan(res->values[i * block_size + j]) || std::isinf(res->values[i * block_size + j])) {
+				std::cout << "cringe on " << i << " " << j << std::endl;
+				return -1;
+			}
+		}
+	}
+	return 0;
 }
 
 
@@ -272,16 +342,18 @@ double check_solution(std::string matrix_fn, std::string solution_fn, std::strin
 		for (int i = 0; i < SIZE; ++i) {
 			mult[i] -= res[i];
 		}
-		double n_1=0, n_2 = 0;
+		double n_1=mult[0], n_2 = res[0];
 
-		for (int i = 0; i < SIZE; ++i) {
-			n_1 += mult[i] * mult[i];
-			n_2 += res[i] * res[i];
+		for (int i = 1; i < SIZE; ++i) {
+			n_1 = std::max(n_1, std::abs(mult[i]));
+			n_2 = std::max(n_2, std::abs(res[i]));
+			//n_1 += mult[i] * mult[i];
+			//n_2 += res[i] * res[i];
 		}
 		delete[] sol;
 		delete[] res;
 		delete[] mult;
-		return std::sqrt(n_1) / std::sqrt(n_2);
+		return n_1 / n_2;
 	}
 }
 
@@ -302,4 +374,23 @@ vect** random_vector_generation(int dim) {
 		}
 	}
 	return res;
+}
+
+void write_decomp_to_file(matrix* m, std::string fn) {
+	int b_row, b_col, row_in_block, col_in_block;
+	std::ofstream out(fn);
+	for (int i = 0; i < block_size * m->size; ++i) {
+		b_row = i / block_size;
+		row_in_block = i % block_size;
+		for (int j = 0; j <= i; ++j) {
+			b_col = j / block_size;
+			col_in_block = j % block_size;
+			if (m->blocks[b_col * m->size + b_row]) {
+				if (m->blocks[b_col * m->size + b_row]->values[row_in_block * block_size + col_in_block] != 0) {
+					out << i << " " << j << " " << m->blocks[b_col * m->size + b_row]->values[row_in_block * block_size + col_in_block] << std::endl;
+				}
+			}
+		}
+	}
+	out.close();
 }

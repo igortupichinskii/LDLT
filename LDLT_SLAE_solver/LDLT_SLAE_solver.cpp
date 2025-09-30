@@ -1,6 +1,7 @@
 ﻿// LDLT_SLAE_solver.cpp : Этот файл содержит функцию "main". Здесь начинается и заканчивается выполнение программы.
 //
 #include <chrono>
+#include <iomanip>
 #include <windows.h>
 #include "functions.h"
 #include <iostream>
@@ -96,28 +97,33 @@ int main(int argc, char *argv[]) //Только путь до файла мат�
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
         nb = m->size;
+        write_decomp_to_file(m, "M_before_LDLT.txt");
         start_time = std::chrono::high_resolution_clock::now();
         std::cout << "Matrix read\n";
     }
     MPI_Bcast(&nb, 1, MPI_INT, 0, MPI_COMM_WORLD);
     if (rank == 0) {
-        for (int column_n = 0; column_n < nb; ++column_n) {
+        for (int column_n = 0; column_n < nb; ++column_n) { //column_n - индекс столбца блочной матрицы, расчет разложения которого сейчас ведется
             // Раскладываем диагональный
             for (int i = 0; i < column_n; ++i) {
-                calc_diag_block(m->blocks[column_n * nb + column_n], m->blocks[column_n * nb + i], m->diagonals[i]);
+                calc_diag_block_non_parallel(m->blocks[column_n * nb + column_n], m->blocks[column_n + i * nb], m->diagonals[i]);
             }
-            calc_diag_block_final(m->blocks[column_n * nb + column_n], m->diagonals[column_n]);
+            auto is_there_nan = calc_diag_block_final_non_parallel(m->blocks[column_n * nb + column_n], m->diagonals[column_n]);
+            if (is_there_nan == -1) {
+                std::cerr << "Nan occured in diag block " << column_n  << std::endl;
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
             //После этого диагональный элемент столбца готов - можно раздавать блоки
             int last_index = column_n;
             int tasks_in_proceed=0;
             std::vector<int> waiting_workers;
-            while (last_index < nb || tasks_in_proceed) {
+            while (last_index < nb - 1 || tasks_in_proceed) {
                 MPI_Status st;
                 MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &st);
                 if (st.MPI_TAG == TAG_READY) { // Это значит, что отправивший сообщение процесс сейчас готов получить задание
                     int dummy;
                     MPI_Recv(&dummy, 1, MPI_INT, st.MPI_SOURCE, TAG_READY, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                    if (last_index < nb) {
+                    if (last_index < nb - 1) {
                         int hdr[3];
                         hdr[1] = column_n;
                         hdr[0] = ++last_index;
@@ -138,7 +144,7 @@ int main(int argc, char *argv[]) //Только путь до файла мат�
                 }
                 else {
                     if (st.MPI_TAG == TAG_GET_DATA) { // Это значит, что он хочет получить новые блоки
-                        int hdr[3]; // Столбец, две строки в порядке возрастания
+                        int hdr[3]; // Столбец, две строки в порядке возрастания (две строки - индексы столбца и строки раскладываемого данным воркером блока)
                         MPI_Recv(hdr, 3, MPI_INT, st.MPI_SOURCE, TAG_GET_DATA, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
                         if (m->blocks[hdr[1] + hdr[0] * nb] == nullptr || m->blocks[hdr[2] + hdr[0] * nb] == nullptr) { //Какой-то из блоков пустой - значит, надо пройти дальше
                             int new_col = hdr[0];
@@ -216,6 +222,7 @@ int main(int argc, char *argv[]) //Только путь до файла мат�
             }
         }
         out.close();
+        write_decomp_to_file(m, "LDLT_decomp.txt");
         std::cout << "Starting solving SLAE" << std::endl;
         start_time = std::chrono::high_resolution_clock::now();
         //Решение нижнетреугольной СЛАУ
@@ -382,12 +389,21 @@ int main(int argc, char *argv[]) //Только путь до файла мат�
         end_time = std::chrono::high_resolution_clock::now();
         //Вывод результата
         std::ofstream out_res("res.txt");
+        out_res << std::scientific << std::setprecision(19);
         for (int i = 0; i < nb; ++i) {
             for (int j = 0; j < block_size; ++j) {
                 out_res << B[i]->values[j] << std::endl;
             }
         }
         out_res.close();
+        std::ofstream out_diag("diag.txt");
+        out_diag << std::scientific << std::setprecision(19);
+        for (int i = 0; i < nb; ++i) {
+            for (int j = 0; j < block_size; ++j) {
+                out_diag << m->diagonals[i]->values[j] << std::endl;
+            }
+        }
+        out_diag.close();
         auto duration_2 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
         std::cout << "Computation SLAE time: " << duration_2.count() << " milliseconds" << std::endl;
         std::cout << "Computation SLAE time: " << duration_2.count() / 1000.0 << " seconds" << std::endl;
@@ -453,24 +469,29 @@ int main(int argc, char *argv[]) //Только путь до файла мат�
                         MPI_Status st_data;
                         MPI_Probe(0, MPI_ANY_TAG, MPI_COMM_WORLD, &st_data);
                         switch (st_data.MPI_TAG) {
-                        case TAG_DIAG:
+                        case TAG_DIAG: {
                             recv_block(diag_b, 0, TAG_DIAG, MPI_COMM_WORLD);
                             recv_diag(diag, 0, TAG_DIAG, MPI_COMM_WORLD);
                             col = b_col;
-                            calc_block_final(work, diag_b, diag);
+                            auto is_there_nan = calc_block_final_non_parallel(work, diag_b, diag);
+                            if (is_there_nan == -1) {
+                                std::cerr << "Nan occured in block " << b_row <<", " << b_col << std::endl;
+                                MPI_Abort(MPI_COMM_WORLD, 1);
+                            }
                             break;
+                        }
                         case TAG_NEW_COLUMN:
                             MPI_Recv(&col, 1, MPI_INT, 0, TAG_NEW_COLUMN, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
                             recv_block(upper, 0, TAG_DATA, MPI_COMM_WORLD);
                             recv_block(lower, 0, TAG_DATA, MPI_COMM_WORLD);
                             recv_diag(diag, 0, TAG_DATA, MPI_COMM_WORLD);
-                            calc_block(work, upper, lower, diag);
+                            calc_block_non_parallel(work, upper, lower, diag);
                             break;
                         case TAG_DATA:
                             recv_block(upper, 0, TAG_DATA, MPI_COMM_WORLD);
                             recv_block(lower, 0, TAG_DATA, MPI_COMM_WORLD);
                             recv_diag(diag, 0, TAG_DATA, MPI_COMM_WORLD);
-                            calc_block(work, upper, lower, diag);
+                            calc_block_non_parallel(work, upper, lower, diag);
                             break;
                         default:
                             break;
@@ -483,7 +504,11 @@ int main(int argc, char *argv[]) //Только путь до файла мат�
                         MPI_Send(&col, 1, MPI_INT, 0, TAG_GET_DIAG, MPI_COMM_WORLD);
                         recv_block(diag_b, 0, TAG_DIAG, MPI_COMM_WORLD);
                         recv_diag(diag, 0, TAG_DIAG, MPI_COMM_WORLD);
-                        hdr[2] = calc_block_final(work, diag_b, diag);
+                        hdr[2] = calc_block_final_non_parallel(work, diag_b, diag);
+                        if (hdr[2] == -1) {
+                            std::cerr << "Nan occured in block " << b_row << ", " << b_col << std::endl;
+                            MPI_Abort(MPI_COMM_WORLD, 1);
+                        }
                     }
                     MPI_Send(&hdr, 3, MPI_INT, 0, TAG_RESULT, MPI_COMM_WORLD);
                     if (hdr[2]) {

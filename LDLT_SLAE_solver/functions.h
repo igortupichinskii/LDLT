@@ -55,11 +55,19 @@ matrix* read_matrix(std::string);
 
 void calc_block(block*, block*, block*, diagonal*);
 
+void calc_block_non_parallel(block*, block*, block*, diagonal*);
+
 int calc_block_final(block*, block*, diagonal*);
+
+int calc_block_final_non_parallel(block*, block*, diagonal*);
 
 void calc_diag_block(block*, block*, diagonal*);
 
+void calc_diag_block_non_parallel(block*, block*, diagonal*);
+
 void calc_diag_block_final(block*, diagonal*);
+
+int calc_diag_block_final_non_parallel(block*, diagonal*);
 
 void solve_L_SLAE(block*, vect*);
 
@@ -76,6 +84,8 @@ double check_solution(std::string, std::string, std::string);
 double random_double(double, double);
 
 vect** random_vector_generation(int);
+
+void write_decomp_to_file(matrix*, std::string);
 
 static inline double hsum256_pd_fast(__m256d v) {
 	__m256d t1 = _mm256_permute2f128_pd(v, v, 0x1); // [x2,x3,x0,x1]
