@@ -7,6 +7,7 @@
 #include <omp.h>
 #include <vector>
 #include <random>
+#include <iomanip>
 
 #define block_size 32
 
@@ -73,7 +74,11 @@ void solve_L_SLAE(block*, vect*);
 
 void solve_D_SLAE(diagonal*, vect*);
 
+void solve_D_SLAE_non_parallel(diagonal*, vect*);
+
 void sub_block_mul_sol(block*, vect*, vect*);
+
+void sub_block_mul_sol_non_parallel(block*, vect*, vect*);
 
 void solve_LT_SLAE(block*, vect*);
 

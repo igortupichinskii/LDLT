@@ -21,6 +21,7 @@
 #define TAG_STOP 200
 #define TAG_START 500
 
+
 struct TaskHdr {
     int col_j;
     int row_i;
@@ -97,7 +98,7 @@ int main(int argc, char *argv[]) //Только путь до файла мат�
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
         nb = m->size;
-        write_decomp_to_file(m, "M_before_LDLT.txt");
+        //write_decomp_to_file(m, "M_before_LDLT.txt");
         start_time = std::chrono::high_resolution_clock::now();
         std::cout << "Matrix read\n";
     }
@@ -106,7 +107,7 @@ int main(int argc, char *argv[]) //Только путь до файла мат�
         for (int column_n = 0; column_n < nb; ++column_n) { //column_n - индекс столбца блочной матрицы, расчет разложения которого сейчас ведется
             // Раскладываем диагональный
             for (int i = 0; i < column_n; ++i) {
-                calc_diag_block_non_parallel(m->blocks[column_n * nb + column_n], m->blocks[column_n + i * nb], m->diagonals[i]);
+                calc_diag_block(m->blocks[column_n * nb + column_n], m->blocks[column_n + i * nb], m->diagonals[i]);
             }
             auto is_there_nan = calc_diag_block_final_non_parallel(m->blocks[column_n * nb + column_n], m->diagonals[column_n]);
             if (is_there_nan == -1) {
@@ -146,29 +147,35 @@ int main(int argc, char *argv[]) //Только путь до файла мат�
                     if (st.MPI_TAG == TAG_GET_DATA) { // Это значит, что он хочет получить новые блоки
                         int hdr[3]; // Столбец, две строки в порядке возрастания (две строки - индексы столбца и строки раскладываемого данным воркером блока)
                         MPI_Recv(hdr, 3, MPI_INT, st.MPI_SOURCE, TAG_GET_DATA, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                        if (m->blocks[hdr[1] + hdr[0] * nb] == nullptr || m->blocks[hdr[2] + hdr[0] * nb] == nullptr) { //Какой-то из блоков пустой - значит, надо пройти дальше
-                            int new_col = hdr[0];
-                            while (new_col < hdr[1]) {
-                                if (m->blocks[hdr[1] + new_col * nb] && m->blocks[hdr[2] + new_col * nb]) {
-                                    break;
-                                }
-                                ++new_col;
-                            }
-                            if (new_col == hdr[1]) {
-                                send_block(m->blocks[new_col * nb + new_col], st.MPI_SOURCE, TAG_DIAG, MPI_COMM_WORLD);
-                                send_diag(m->diagonals[new_col], st.MPI_SOURCE, TAG_DIAG, MPI_COMM_WORLD);
-                            }
-                            else {
-                                MPI_Send(&new_col, 1, MPI_INT, st.MPI_SOURCE, TAG_NEW_COLUMN, MPI_COMM_WORLD);
-                                send_block(m->blocks[hdr[1] + new_col * nb], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
-                                send_block(m->blocks[hdr[2] + new_col * nb], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
-                                send_diag(m->diagonals[new_col], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
-                            }
+                        if (hdr[0] == hdr[1]) {
+                            send_block(m->blocks[hdr[0] * nb + hdr[0]], st.MPI_SOURCE, TAG_DIAG, MPI_COMM_WORLD);
+                            send_diag(m->diagonals[hdr[0]], st.MPI_SOURCE, TAG_DIAG, MPI_COMM_WORLD);
                         }
                         else {
-                            send_block(m->blocks[hdr[1] + hdr[0] * nb], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
-                            send_block(m->blocks[hdr[2] + hdr[0] * nb], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
-                            send_diag(m->diagonals[hdr[0]], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                            if (m->blocks[hdr[1] + hdr[0] * nb] == nullptr || m->blocks[hdr[2] + hdr[0] * nb] == nullptr) { //Какой-то из блоков пустой - значит, надо пройти дальше
+                                int new_col = hdr[0] + 1;
+                                while (new_col < hdr[1]) {
+                                    if (m->blocks[hdr[1] + new_col * nb] && m->blocks[hdr[2] + new_col * nb]) {
+                                        break;
+                                    }
+                                    ++new_col;
+                                }
+                                if (new_col == hdr[1]) {
+                                    send_block(m->blocks[new_col * nb + new_col], st.MPI_SOURCE, TAG_DIAG, MPI_COMM_WORLD);
+                                    send_diag(m->diagonals[new_col], st.MPI_SOURCE, TAG_DIAG, MPI_COMM_WORLD);
+                                }
+                                else {
+                                    MPI_Send(&new_col, 1, MPI_INT, st.MPI_SOURCE, TAG_NEW_COLUMN, MPI_COMM_WORLD);
+                                    send_block(m->blocks[hdr[1] + new_col * nb], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                                    send_block(m->blocks[hdr[2] + new_col * nb], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                                    send_diag(m->diagonals[new_col], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                                }
+                            }
+                            else {
+                                send_block(m->blocks[hdr[1] + hdr[0] * nb], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                                send_block(m->blocks[hdr[2] + hdr[0] * nb], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                                send_diag(m->diagonals[hdr[0]], st.MPI_SOURCE, TAG_DATA, MPI_COMM_WORLD);
+                            }
                         }
                     }
                     else {
@@ -186,14 +193,6 @@ int main(int argc, char *argv[]) //Только путь до файла мат�
                                 }
                             }
                             tasks_in_proceed--;
-                        }
-                        else {
-                            if (st.MPI_TAG == TAG_GET_DIAG) {
-                                int col;
-                                MPI_Recv(&col, 1, MPI_INT, st.MPI_SOURCE, TAG_GET_DIAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                                send_block(m->blocks[col * nb + col], st.MPI_SOURCE, TAG_DIAG, MPI_COMM_WORLD);
-                                send_diag(m->diagonals[col], st.MPI_SOURCE, TAG_DIAG, MPI_COMM_WORLD);
-                            }
                         }
                     }
                 }
@@ -216,13 +215,14 @@ int main(int argc, char *argv[]) //Только путь до файла мат�
 
         vect** B = random_vector_generation(m->size);
         std::ofstream out("b.txt");
+        out << std::scientific << std::setprecision(19);
         for (int i = 0; i < m->size; ++i) {
             for (int j = 0; j < block_size; ++j) {
                 out << B[i]->values[j] << std::endl;
             }
         }
         out.close();
-        write_decomp_to_file(m, "LDLT_decomp.txt");
+        //write_decomp_to_file(m, "LDLT_decomp.txt");
         std::cout << "Starting solving SLAE" << std::endl;
         start_time = std::chrono::high_resolution_clock::now();
         //Решение нижнетреугольной СЛАУ
@@ -396,14 +396,14 @@ int main(int argc, char *argv[]) //Только путь до файла мат�
             }
         }
         out_res.close();
-        std::ofstream out_diag("diag.txt");
+        /*std::ofstream out_diag("diag.txt");
         out_diag << std::scientific << std::setprecision(19);
         for (int i = 0; i < nb; ++i) {
             for (int j = 0; j < block_size; ++j) {
                 out_diag << m->diagonals[i]->values[j] << std::endl;
             }
         }
-        out_diag.close();
+        out_diag.close();*/
         auto duration_2 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
         std::cout << "Computation SLAE time: " << duration_2.count() << " milliseconds" << std::endl;
         std::cout << "Computation SLAE time: " << duration_2.count() / 1000.0 << " seconds" << std::endl;
@@ -457,10 +457,15 @@ int main(int argc, char *argv[]) //Только путь до файла мат�
                     if (hdr[2]) {
                         recv_block(work, 0, TAG_TASK, MPI_COMM_WORLD);
                     }
+                    else {
+                        delete work;
+                        work = new block;
+                    }
                     int b_col = hdr[1];
                     int b_row = hdr[0];
                     int col = 0;
-                    while (col < b_col) {
+                    bool calculation_done = false;
+                    while (!calculation_done) {
                         int hdr[3];
                         hdr[0] = col;
                         hdr[1] = b_col;
@@ -473,11 +478,20 @@ int main(int argc, char *argv[]) //Только путь до файла мат�
                             recv_block(diag_b, 0, TAG_DIAG, MPI_COMM_WORLD);
                             recv_diag(diag, 0, TAG_DIAG, MPI_COMM_WORLD);
                             col = b_col;
-                            auto is_there_nan = calc_block_final_non_parallel(work, diag_b, diag);
-                            if (is_there_nan == -1) {
+                            int hdr_res[3];
+                            hdr_res[0] = b_row;
+                            hdr_res[1] = b_col;
+                            hdr_res[2] = calc_block_final_non_parallel(work, diag_b, diag);
+                            if (hdr_res[2] == -1) {
                                 std::cerr << "Nan occured in block " << b_row <<", " << b_col << std::endl;
                                 MPI_Abort(MPI_COMM_WORLD, 1);
                             }
+                            MPI_Send(hdr_res, 3, MPI_INT, 0, TAG_RESULT, MPI_COMM_WORLD);
+                            if (hdr_res[2]) {
+                                send_block(work, 0, TAG_RESULT, MPI_COMM_WORLD);
+                            }
+                            calculation_done = true;
+                            //std::cout << "block " << "(" << b_row << ", " << b_col << ") is done and " << hdr_res[2] << std::endl;
                             break;
                         }
                         case TAG_NEW_COLUMN:
@@ -485,35 +499,20 @@ int main(int argc, char *argv[]) //Только путь до файла мат�
                             recv_block(upper, 0, TAG_DATA, MPI_COMM_WORLD);
                             recv_block(lower, 0, TAG_DATA, MPI_COMM_WORLD);
                             recv_diag(diag, 0, TAG_DATA, MPI_COMM_WORLD);
-                            calc_block_non_parallel(work, upper, lower, diag);
+                            calc_block(work, upper, lower, diag);
                             break;
                         case TAG_DATA:
                             recv_block(upper, 0, TAG_DATA, MPI_COMM_WORLD);
                             recv_block(lower, 0, TAG_DATA, MPI_COMM_WORLD);
                             recv_diag(diag, 0, TAG_DATA, MPI_COMM_WORLD);
-                            calc_block_non_parallel(work, upper, lower, diag);
+                            calc_block(work, upper, lower, diag);
                             break;
                         default:
                             break;
                         }
                         col++;
                     }
-                    hdr[0] = b_row;
-                    hdr[1] = b_col;
-                    if (col == b_col) {
-                        MPI_Send(&col, 1, MPI_INT, 0, TAG_GET_DIAG, MPI_COMM_WORLD);
-                        recv_block(diag_b, 0, TAG_DIAG, MPI_COMM_WORLD);
-                        recv_diag(diag, 0, TAG_DIAG, MPI_COMM_WORLD);
-                        hdr[2] = calc_block_final_non_parallel(work, diag_b, diag);
-                        if (hdr[2] == -1) {
-                            std::cerr << "Nan occured in block " << b_row << ", " << b_col << std::endl;
-                            MPI_Abort(MPI_COMM_WORLD, 1);
-                        }
-                    }
-                    MPI_Send(&hdr, 3, MPI_INT, 0, TAG_RESULT, MPI_COMM_WORLD);
-                    if (hdr[2]) {
-                        send_block(work, 0, TAG_RESULT, MPI_COMM_WORLD);
-                    }
+                    
                 }
                 else {
                     if (st.MPI_TAG == TAG_STOP) {

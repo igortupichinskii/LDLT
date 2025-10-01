@@ -129,8 +129,9 @@ int calc_block_final(block* res, block* upper, diagonal* diag) {
 	return 1;
 }
 
-int calc_block_final_non_parallel(block*res, block* upper, diagonal* diag) {
+int calc_block_final_non_parallel(block* res, block* upper, diagonal* diag) {
 	if (res == nullptr) return 0;
+	int is_not_zero = 0;
 	for (int i = 0; i < block_size; ++i) {
 		for (int j = 0; j < block_size; ++j) { // Обработка элемента (i,j)
 			for (int k = 0; k < j; ++k) {
@@ -140,20 +141,24 @@ int calc_block_final_non_parallel(block*res, block* upper, diagonal* diag) {
 			if (std::isnan(res->values[i * block_size + j])) {
 				return -1;
 			}
+			if (res->values[i * block_size + j] != 0) {
+				is_not_zero = 1;
+			}
 		}
 	}
+	return is_not_zero;
 
 	// Проверка на нулевой блок (если нулевой, то очищаем память) - важно, что память для блока выделялась именно в памяти экземпляра программы
-	__m256d zero = _mm256_setzero_pd();
-	for (int i = 0; i < block_size * block_size; i += 4) {
-		__m256d vec = _mm256_load_pd(res->values + i);
-		__m256d cmp = _mm256_cmp_pd(vec, zero, _CMP_NEQ_OQ);
-		int mask = _mm256_movemask_pd(cmp);
-		if (mask != 0) {
-			return 0;
-		}
-	}
-	return 1;
+	//__m256d zero = _mm256_setzero_pd();
+	//for (int i = 0; i < block_size * block_size; i += 4) {
+	//	__m256d vec = _mm256_load_pd(res->values + i);
+	//	__m256d cmp = _mm256_cmp_pd(vec, zero, _CMP_NEQ_OQ);
+	//	int mask = _mm256_movemask_pd(cmp);
+	//	if (mask != 0) {
+	//		return 0;
+	//	}
+	//}
+	//return 1;
 }
 
 
@@ -269,6 +274,12 @@ void solve_D_SLAE(diagonal* D, vect* b) {
 	}
 }
 
+void solve_D_SLAE_non_parallel(diagonal* D, vect* b) {
+	for (int i = 0; i < block_size; ++i) {
+		b->values[i] /= D->values[i];
+	}
+}
+
 void sub_block_mul_sol(block* A, vect* x, vect* b) {
 	for (int i = 0; i < block_size; i += 4) {
 		__m256d d = _mm256_load_pd(x->values + i);
@@ -278,18 +289,26 @@ void sub_block_mul_sol(block* A, vect* x, vect* b) {
 	}
 }
 
+void sub_block_mul_sol_non_parallel(block* A, vect* x, vect* b) {
+	for (int i = 0; i < block_size; ++i) {
+		for (int j = 0; j < block_size; ++j) {
+			b->values[i] -= A->values[i * block_size + j] * x->values[j];
+		}
+	}
+}
+
 void solve_LT_SLAE(block* A, vect* b) {
 	for (int i = block_size - 2; i >= 0; --i) {
 		for (int j = block_size - 1; j >= i + 1; --j) {
-			b->values[i] -= A->values[j * block_size + i] * b->values[i];
+			b->values[i] -= A->values[j * block_size + i] * b->values[j];
 		}
 	}
 }
 
 void sub_block_T_mul_sol(block* A, vect* x, vect* b) {
-	for (int n = 0; n < block_size; ++n) {
-		for (int i = 0; i < block_size; ++i) {
-			b->values[i] -= A->values[i * block_size + n] * x->values[i];
+	for (int i = 0; i < block_size; ++i) {
+		for (int j = 0; j < block_size; ++j) {
+			b->values[i] -= A->values[j * block_size + i] * x->values[j];
 		}
 	}
 }
@@ -379,6 +398,7 @@ vect** random_vector_generation(int dim) {
 void write_decomp_to_file(matrix* m, std::string fn) {
 	int b_row, b_col, row_in_block, col_in_block;
 	std::ofstream out(fn);
+	out << std::scientific << std::setprecision(19);
 	for (int i = 0; i < block_size * m->size; ++i) {
 		b_row = i / block_size;
 		row_in_block = i % block_size;
