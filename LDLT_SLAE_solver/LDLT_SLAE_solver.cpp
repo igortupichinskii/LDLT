@@ -62,6 +62,35 @@ void set_processor_affinity(int rank) {
     std::cout << "Process " << rank << " bound to core " << core << std::endl;
 }
 
+
+void set_processor_affinity_local()
+{
+    // Вычисляем "локальный ранг" внутри узла (в пределах одного ПК)
+    MPI_Comm local_comm;
+    MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL, &local_comm);
+    int local_rank = 0;
+    MPI_Comm_rank(local_comm, &local_rank);
+    MPI_Comm_free(&local_comm);
+
+    // Предполагаем нумерацию логических CPU как (0,1)=ядро0, (2,3)=ядро1, ... (Windows типично так делает)
+    // Т.к. у нас 6 физических ядер с HT -> 12 логических: 0..11
+    const int phys_core_index = local_rank;            // 0..5 на каждом узле
+    const int ht0 = phys_core_index * 2;               // логический номер гиперпотока 0 этого ядра
+    const int ht1 = phys_core_index * 2 + 1;           // логический номер гиперпотока 1
+
+    DWORD_PTR newMask = (1ULL << ht0) | (1ULL << ht1); // разрешаем ОТВЕТСТВЕННО обе ветки HT одного физ. ядра
+
+    HANDLE hProcess = GetCurrentProcess();
+    if (!SetProcessAffinityMask(hProcess, newMask)) {
+        std::cerr << "SetProcessAffinityMask failed for local_rank " << local_rank << std::endl;
+    }
+    else {
+        std::cout << "Process local_rank " << local_rank
+            << " bound to logical CPUs {" << ht0 << "," << ht1 << "}" << std::endl;
+    }
+}
+
+
 std::string convert_to_forward_slashes(const std::string& path) {
     std::string result = path;
     for (auto& c : result) {
@@ -77,7 +106,16 @@ int main(int argc, char *argv[]) //Только путь до файла мат�
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    set_processor_affinity(rank);
+    //set_processor_affinity(rank);
+    set_processor_affinity_local();
+
+    omp_set_dynamic(0);
+    omp_set_num_threads(2);
+#pragma omp parallel
+    {
+        int n_thread = omp_get_thread_num();
+        std::cout << "Thread " << n_thread << " on rank " << rank << std::endl;
+    }
 
     MPI_Datatype MPI_BLOCK, MPI_DIAG;
     MPI_Type_contiguous(block_size * block_size, MPI_DOUBLE, &MPI_BLOCK);
